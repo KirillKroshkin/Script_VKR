@@ -1,0 +1,215 @@
+import warnings
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from scipy.stats import ttest_ind
+import scipy.stats as stats           # ← добавили этот импорт
+from sklearn.decomposition import PCA
+
+import statsmodels.formula.api as smf
+from statsmodels.multivariate.manova import MANOVA
+from statsmodels.stats.multitest import multipletests
+warnings.filterwarnings("ignore")
+
+# 1. Загрузка и объединение
+wt_df = pd.read_excel("WT_DSHT_RunStatistics_FULL.xlsx", na_values=['-'])
+fus_df= pd.read_excel("FUS_DSHT_RunStatistics_FULL.xlsx", na_values=['-'])
+wt_df['Group'] = 'WT'
+fus_df['Group']= 'FUS'
+df = pd.concat([wt_df, fus_df], ignore_index=True)
+print("Combined data shape:", df.shape)
+
+# 2. Очистка дат и удаление некорректных
+df['Time_Point'] = pd.to_datetime(
+    df['Time_Point'].str.replace('..','.', regex=False),
+    dayfirst=True, errors='coerce'
+)
+bad = df[df['Time_Point'].isna()]
+if not bad.empty:
+    print("⚠️ Удаляем строки с некорректными датами:")
+    print(bad[['Animal','Trial','Time_Point']].head())
+df = df.dropna(subset=['Time_Point']).copy()
+print("After dropping bad dates:", df.shape)
+
+# 3. Trial/Run → числа, вычисление Week (1–5)
+df['Trial'] = df['Trial'].astype(str).str.extract(r'(\d+)').astype(int)
+df['Run']   = df['Run'].astype(str).str.extract(r'(\d+)').astype(int)
+start = df['Time_Point'].min()
+df['Week'] = ((df['Time_Point'] - start).dt.days // 7) + 1
+df = df[df['Week'] <= 5]
+print("Weeks range:", df['Week'].min(), "–", df['Week'].max())
+
+# 4. Агрегация пробежек по Trial
+numeric_cols = df.select_dtypes(include=[np.number]).columns.difference(['Week','Trial','Run'])
+trial_avg = df.groupby(
+    ['Group','Animal','Time_Point','Week','Trial'], as_index=False
+)[numeric_cols].mean()
+print("After averaging runs:", trial_avg.shape)
+
+# 5. Нормализация по WT внутри недели
+norm_df = trial_avg.copy()
+for wk in range(1,6):
+    mask = norm_df['Week']==wk
+    wt_vals = norm_df.loc[mask & (norm_df['Group']=='WT'), numeric_cols]
+    if wt_vals.empty:
+        continue
+    mu    = wt_vals.mean()
+    sigma = wt_vals.std().replace(0, np.nan)
+    norm_df.loc[mask, numeric_cols] = (norm_df.loc[mask, numeric_cols] - mu) / sigma
+
+# 6. Определение наборов параметров
+basic = [
+    "Weight","Run_Maximum_Variation_Mean","StepSequence_NumberOfPatterns",
+    "StepSequence_RegularityIndex","BOS_FrontPaws_Mean","BOS_HindPaws_Mean",
+    "OtherStatistics_Duration_Mean","OtherStatistics_Average_Speed_Mean",
+    "OtherStatistics_NumberOfSteps","OtherStatistics_Cadence",
+    "PrintPositions_RightPaws_Mean","PrintPositions_LeftPaws_Mean"
+]
+major = [
+    "RF_Stand_Mean","RH_Stand_Mean","LF_Stand_Mean","LH_Stand_Mean",
+    "RF_StandIndex_Mean","RH_StandIndex_Mean","LF_StandIndex_Mean","LH_StandIndex_Mean",
+    "RF_MaxContactAt_Mean","RH_MaxContactAt_Mean","LF_MaxContactAt_Mean","LH_MaxContactAt_Mean",
+    "RF_MaxContactArea_Mean","RH_MaxContactArea_Mean","LF_MaxContactArea_Mean","LH_MaxContactArea_Mean",
+    "RF_MaxContactMaxIntensity_Mean","RH_MaxContactMaxIntensity_Mean",
+    "LF_MaxContactMaxIntensity_Mean","LH_MaxContactMaxIntensity_Mean",
+    "RF_MaxContactMeanIntensity_Mean","RH_MaxContactMeanIntensity_Mean",
+    "LF_MaxContactMeanIntensity_Mean","LH_MaxContactMeanIntensity_Mean",
+    "RF_PrintLength_Mean","RH_PrintLength_Mean","LF_PrintLength_Mean","LH_PrintLength_Mean",
+    "RF_PrintWidth_Mean","RH_PrintWidth_Mean","LF_PrintWidth_Mean","LH_PrintWidth_Mean",
+    "RF_PrintArea_Mean","RH_PrintArea_Mean","LF_PrintArea_Mean","LH_PrintArea_Mean",
+    "RF_MaxIntensityAt_Mean","RH_MaxIntensityAt_Mean","LF_MaxIntensityAt_Mean","LH_MaxIntensityAt_Mean",
+    "RF_MaxIntensity_Mean","RH_MaxIntensity_Mean","LF_MaxIntensity_Mean","LH_MaxIntensity_Mean",
+    "RF_MinIntensity_Mean","RH_MinIntensity_Mean","LF_MinIntensity_Mean","LH_MinIntensity_Mean",
+    "RF_MeanIntensity_Mean","RH_MeanIntensity_Mean","LF_MeanIntensity_Mean","LH_MeanIntensity_Mean",
+    "RF_MeanIntensityOfThe15MostIntensePixels_Mean",
+    "RH_MeanIntensityOfThe15MostIntensePixels_Mean",
+    "LF_MeanIntensityOfThe15MostIntensePixels_Mean",
+    "LH_MeanIntensityOfThe15MostIntensePixels_Mean",
+    "RF_Swing_Mean","RH_Swing_Mean","LF_Swing_Mean","LH_Swing_Mean",
+    "RF_SwingSpeed_Mean","RH_SwingSpeed_Mean","LF_SwingSpeed_Mean","LH_SwingSpeed_Mean",
+    "RF_StrideLength_Mean","RH_StrideLength_Mean","LF_StrideLength_Mean","LH_StrideLength_Mean",
+    "RF_StepCycle_Mean","RH_StepCycle_Mean","LF_StepCycle_Mean","LH_StepCycle_Mean",
+    "RF_DutyCycle_Mean","RH_DutyCycle_Mean","LF_DutyCycle_Mean","LH_DutyCycle_Mean",
+    "RF_SingleStance_Mean","RH_SingleStance_Mean","LF_SingleStance_Mean","LH_SingleStance_Mean",
+    "RF_InitialDualStance_Mean","RH_InitialDualStance_Mean",
+    "LF_InitialDualStance_Mean","LH_InitialDualStance_Mean",
+    "RF_TerminalDualStance_Mean","RH_TerminalDualStance_Mean",
+    "LF_TerminalDualStance_Mean","LH_TerminalDualStance_Mean",
+    "RF_BodySpeed_Mean","RH_BodySpeed_Mean","LF_BodySpeed_Mean","LH_BodySpeed_Mean",
+    "RF_BodySpeedVariation_Mean","RH_BodySpeedVariation_Mean",
+    "LF_BodySpeedVariation_Mean","LH_BodySpeedVariation_Mean"
+]
+manual = [
+    "Run_Duration_Mean","Run_Average_Speed_Mean","Run_Maximum_Variation_Mean",
+    "RH_ToeSpread_Mean","RH_IntermediateToeSpread_Mean","RH_ManualPrintLength_Mean",
+    "RH_PawAngleBodyAxis_Mean","RH_PawAngleMovementVector_Mean",
+    "LH_ToeSpread_Mean","LH_IntermediateToeSpread_Mean","LH_ManualPrintLength_Mean",
+    "LH_PawAngleBodyAxis_Mean","LH_PawAngleMovementVector_Mean"
+]
+basic  = [c for c in basic  if c in trial_avg.columns]
+major  = [c for c in major  if c in trial_avg.columns]
+manual = [c for c in manual if c in trial_avg.columns]
+
+# 7. MANOVA
+os.makedirs("results", exist_ok=True)
+with open("results/MANOVA.txt","w") as mf:
+    for name, cols in [("Basic",basic),("Major",major),("Manual",manual)]:
+        mf.write(f"=== {name} set ===\n")
+        for wk in range(1,6):
+            sub = norm_df[norm_df['Week']==wk]
+            if sub['Group'].nunique()<2 or len(cols)<2: continue
+            res = MANOVA.from_formula(" + ".join(cols)+" ~ Group", sub).mv_test()
+            mf.write(f"Week {wk}: OK\n")
+
+# 8. PCA для всех 5 недель
+os.makedirs("results/PCA", exist_ok=True)
+for name, cols in [("Basic",basic),("Major",major),("Manual",manual)]:
+    for wk in range(1,6):
+        wd = norm_df[norm_df['Week']==wk]
+        features = [c for c in cols if c in wd.columns and not wd[c].isna().all()]
+        if len(features)<2 or wd['Group'].nunique()<2: continue
+        pdata = wd.dropna(subset=features)
+        if pdata.shape[0]<2: continue
+        pcs = PCA(2).fit_transform(pdata[features].values)
+        plt.figure(figsize=(6,5))
+        for g,m in [('WT','o'),('FUS','s')]:
+            sel = pdata['Group']==g
+            plt.scatter(pcs[sel,0],pcs[sel,1],marker=m,label=g,alpha=0.7)
+        plt.title(f"{name} PCA Week {wk}")
+        plt.legend(); plt.tight_layout()
+        plt.savefig(f"results/PCA/PCA_{name}_W{wk}.png"); plt.close()
+
+# 9. Выявление ранних маркеров и heatmaps
+os.makedirs("results/heatmap", exist_ok=True)
+early = []
+pval_tables = {}
+for label, cols in [("Basic",basic),("Major",major),("Manual",manual)]:
+    pvals=[]
+    for p in cols:
+        for wk in range(1,6):
+            sub = norm_df[norm_df['Week']==wk]
+            a = sub[sub['Group']=='WT'][p].dropna()
+            b = sub[sub['Group']=='FUS'][p].dropna()
+            if len(a)<2 or len(b)<2: continue
+            _,pv = ttest_ind(a,b,equal_var=False)
+            pvals.append((p,wk,pv))
+    dfp = pd.DataFrame(pvals, columns=['Param','Week','p'])
+    if dfp.empty:
+        pval_tables[label] = dfp
+        continue
+    dfp['p_adj'] = multipletests(dfp['p'], method='fdr_bh')[1]
+    pval_tables[label] = dfp
+
+    sig = dfp[dfp['p_adj']<0.05]
+    for p in sig['Param'].unique():
+        wk0 = sig[sig['Param']==p]['Week'].min()
+        early.append((label,p,wk0))
+
+    mat = dfp.pivot(index='Param', columns='Week', values='p_adj') \
+         .reindex(cols) \
+         .fillna(1) \
+         .clip(lower=1e-6)
+    plt.figure(figsize=(len(mat.columns)*0.5,len(mat.index)*0.2))
+    sns.heatmap(-np.log10(mat), cbar_kws={'label':'-log10(p_adj)'})
+    plt.title(f"{label} heatmap"); plt.tight_layout()
+    plt.savefig(f"results/heatmap/heat_{label}.png"); plt.close()
+
+# 10. Динамика ранних маркеров
+os.makedirs("results/dynamics", exist_ok=True)
+for label,param,wk0 in early:
+    dfp = norm_df.groupby(['Week','Group'])[param].agg(['mean','count','std']).reset_index()
+    dfp['sem'] = dfp['std']/np.sqrt(dfp['count'])
+    plt.figure(figsize=(6,5))
+    for g,c,mk in [('WT','blue','o'),('FUS','red','s')]:
+        sub = dfp[dfp['Group']==g]
+        plt.errorbar(sub['Week'], sub['mean'], yerr=sub['sem'],
+                     label=g, color=c, fmt=mk, capsize=3)
+    plt.title(f"{label} – {param} dynamics"); plt.xlabel("Week"); plt.ylabel(param)
+    plt.legend(); plt.tight_layout()
+    plt.savefig(f"results/dynamics/{label}_{param}.png"); plt.close()
+
+# 11. MixedLM/OLS для самых ранних
+os.makedirs("results/models", exist_ok=True)
+for label,param,wk0 in early:
+    dfm = norm_df[['Animal','Group','Week',param]].dropna()
+    safe = "".join(ch if ch.isalnum() else "_" for ch in param)
+    formula = f"{safe} ~ Group + C(Week)"
+    try:
+        md = smf.mixedlm(formula, dfm, groups=dfm['Animal']).fit()
+        summary = md.summary().as_text()
+    except:
+        summary = smf.ols(formula, dfm).fit().summary().as_text()
+    with open(f"results/models/{label}_{safe}.txt","w") as f:
+        f.write(summary)
+
+# 12. Сохранение
+trial_avg.to_csv("results/trial_averated.csv", index=False)
+norm_df.to_csv("results/normalized.csv", index=False)
+pd.DataFrame(early, columns=['Set','Param','FirstWeek']).to_csv(
+    "results/early_markers.csv", index=False
+)
+
+print("Анализ завершён, все результаты и графики сохранены.")
