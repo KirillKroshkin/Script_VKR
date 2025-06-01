@@ -102,21 +102,15 @@ major = [
     "RF_BodySpeedVariation_Mean","RH_BodySpeedVariation_Mean",
     "LF_BodySpeedVariation_Mean","LH_BodySpeedVariation_Mean"
 ]
-manual = [
-    "Run_Duration_Mean","Run_Average_Speed_Mean","Run_Maximum_Variation_Mean",
-    "RH_ToeSpread_Mean","RH_IntermediateToeSpread_Mean","RH_ManualPrintLength_Mean",
-    "RH_PawAngleBodyAxis_Mean","RH_PawAngleMovementVector_Mean",
-    "LH_ToeSpread_Mean","LH_IntermediateToeSpread_Mean","LH_ManualPrintLength_Mean",
-    "LH_PawAngleBodyAxis_Mean","LH_PawAngleMovementVector_Mean"
-]
+
 basic  = [c for c in basic  if c in trial_avg.columns]
 major  = [c for c in major  if c in trial_avg.columns]
-manual = [c for c in manual if c in trial_avg.columns]
+
 
 # 7. MANOVA
 os.makedirs("results", exist_ok=True)
 with open("results/MANOVA.txt","w") as mf:
-    for name, cols in [("Basic",basic),("Major",major),("Manual",manual)]:
+    for name, cols in [("Basic",basic),("Major",major)]:
         mf.write(f"=== {name} set ===\n")
         for wk in range(1,6):
             sub = norm_df[norm_df['Week']==wk]
@@ -126,7 +120,7 @@ with open("results/MANOVA.txt","w") as mf:
 
 # 8. PCA для всех 5 недель
 os.makedirs("results/PCA", exist_ok=True)
-for name, cols in [("Basic",basic),("Major",major),("Manual",manual)]:
+for name, cols in [("Basic",basic),("Major",major)]:
     for wk in range(1,6):
         wd = norm_df[norm_df['Week']==wk]
         features = [c for c in cols if c in wd.columns and not wd[c].isna().all()]
@@ -146,7 +140,7 @@ for name, cols in [("Basic",basic),("Major",major),("Manual",manual)]:
 os.makedirs("results/heatmap", exist_ok=True)
 early = []
 pval_tables = {}
-for label, cols in [("Basic",basic),("Major",major),("Manual",manual)]:
+for label, cols in [("Basic",basic),("Major",major)]:
     pvals=[]
     for p in cols:
         for wk in range(1,6):
